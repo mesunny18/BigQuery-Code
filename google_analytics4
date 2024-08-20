@@ -1,0 +1,72 @@
+with session_source as 
+(  select user_pseudo_id, ga_session_id,event_timestamp , session_source, session_medium, session_campaign, session_term,
+  city,country,continent, browser,browser_version,device,max(engaged_session) as engaged_session
+  from
+  (select distinct user_pseudo_id, event_timestamp,ga_session_id,event_name,
+  first_value(event_source) over(partition by user_pseudo_id,ga_session_id order by case when event_source is null then 0 else 1 end desc, 
+  event_timestamp asc) as session_source,
+  first_value(event_medium) over(partition by user_pseudo_id,ga_session_id order by case when event_medium is null then 0 else 1 end desc, 
+  event_timestamp asc) as session_medium,
+  first_value(event_campaign) over(partition by user_pseudo_id,ga_session_id order by case when event_campaign is null then 0 else 1 end desc, 
+  event_timestamp asc) as session_campaign,
+  first_value(event_term) over(partition by user_pseudo_id,ga_session_id order by case when event_term is null then 0 else 1 end desc, 
+  event_timestamp asc) as session_term,
+   engaged_session, city,country,continent, browser,browser_version,device
+   from
+  (select user_pseudo_id, event_timestamp,event_name,
+  (select value.int_value from unnest(event_params) where key='ga_session_id' and 
+   event_name='page_view') as ga_session_id,
+  (select value.int_value from unnest(event_params) where key='ga_session_number' and 
+   event_name='page_view') as ga_session_number, 
+   device.category as device,
+   device.web_info.browser as browser,
+   device.web_info.browser_version as browser_version,
+   geo.city as city,
+   geo.country as country,
+   geo.continent as continent,   
+  (select value.int_value from unnest(event_params) where key='session_engaged' and 
+   event_name='page_view') as engaged_session,
+  (select value.string_value from unnest(event_params) where key='source' and 
+   event_name='page_view') as event_source,
+   (select value.string_value from unnest(event_params) where key='medium' and 
+   event_name='page_view') as event_medium,
+   (select value.string_value from unnest(event_params) where key='campaign' and 
+   event_name='page_view') as event_campaign,
+   (select value.string_value from unnest(event_params) where key='term' and 
+   event_name='page_view') as event_term
+  from `bigquery-public-data.ga4_obfuscated_sample_ecommerce.events_20210131`))
+  where event_name not in ('first_visit','session_start')
+  group by user_pseudo_id, ga_session_id,event_timestamp , session_source, session_medium, session_campaign, session_term,
+  city,country,continent, browser,browser_version,device
+)
+
+,prebase as
+(
+  select *, row_number() over(partition by date,user_pseudo_id,page,ga_session_id order by event_timestamp asc) as row_id
+ from  
+(select  event_name,user_pseudo_id ,cast(concat(substr(event_date,1,4),'-',substr(event_date,5,2),'-',substr(event_date,7,2)) as date) as date, event_timestamp, timestamp_micros(event_timestamp) as timestamp,
+(select value.int_value from unnest(event_params) where key='ga_session_id' and event_name='page_view') as ga_session_id,
+(select value.string_value from unnest(event_params) where key='page_location' and event_name='page_view') as page,
+(select value.int_value from unnest(event_params) where key='ga_session_number' and event_name='page_view') as ga_session_number,
+lag((select value.string_value from unnest(event_params) where key='page_location' and event_name='page_view'),1)over(partition by user_pseudo_id,(select value.int_value from unnest(event_params) where key='ga_session_id' and event_name='page_view') order by event_timestamp asc) as previous_page,
+lead((select value.string_value from unnest(event_params) where key='page_location' and event_name='page_view'),1)over(partition by user_pseudo_id,(select value.int_value from unnest(event_params) where key='ga_session_id' and event_name='page_view') order by event_timestamp asc) as next_page
+from `bigquery-public-data.ga4_obfuscated_sample_ecommerce.events_20210131`)
+)
+,user_engagement as
+(select *, row_number() over(partition by date,user_pseudo_id,page,ga_session_id order by event_timestamp asc) as row_id from (
+ select  event_name ,cast(concat(substr(event_date,1,4),'-',substr(event_date,5,2),'-',substr(event_date,7,2)) as date) as date, event_timestamp, timestamp_micros(event_timestamp),user_pseudo_id,
+(select value.int_value from unnest(event_params) where key='ga_session_id' and event_name='user_engagement') as ga_session_id,
+(select value.string_value from unnest(event_params) where key='page_location' and event_name='user_engagement') as page,
+((select value.int_value from unnest(event_params) where key='engagement_time_msec' and event_name='user_engagement')/1000) as engagement_time
+from `bigquery-public-data.ga4_obfuscated_sample_ecommerce.events_20210131`
+where event_name='user_engagement'
+)),
+
+base1 as
+(
+  select p.*, s.session_source, s.session_medium, s.session_campaign, s.session_term,s.device,
+  s.city, s.country,s.continent, s.browser,s.browser_version, u.engagement_time from prebase p
+  left join session_source s on p.user_pseudo_id=s.user_pseudo_id
+  left join user_engagement u on  p.user_pseudo_id=u.user_pseudo_id
+)
+select * from base1
